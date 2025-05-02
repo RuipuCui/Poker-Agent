@@ -5,14 +5,20 @@ $(document).ready(function() {
     if (!window.console) window.console = {};
     if (!window.console.log) window.console.log = function() {};
 
-    $("#registration_form").on("submit", function() {
+    $("#registration_form").on("submit", function(e) {
+        e.preventDefault();
         registerPlayer($(this));
-        return false;
     });
-    $("#start_game_form").on("submit", function() {
-        startGame()
-        return false;
+    
+    $("#start_game_form").on("submit", function(e) {
+        e.preventDefault();
+        startGame();
     });
+
+    $("#pause_button").on("click", function() {
+        togglePause();
+    });
+  
     updater.start();
 });
 
@@ -73,12 +79,26 @@ var updater = {
      *  URL would be "ws://localhost/pokersocket:8888".
      */
     start: function() {
-        var url = "ws://" + location.host + "/pokersocket";
+        var scheme = location.protocol === "https:" ? "wss://" : "ws://";
+        var url = scheme + location.host + "/pokersocket";
+        console.log("Connecting to WebSocket at: " + url);
         updater.socket = new WebSocket(url);
         updater.socket.onmessage = function(event) {
-            window.console.log("received new message: " + event.data)
-            message = JSON.parse(event.data)
-            if ('config_update' == message['message_type']) {
+            var message = JSON.parse(event.data);
+            console.log("Received message:", message);
+            
+            if (message.message_type === 'game_state_update') {
+                console.log("Game state update:", message.is_paused);
+                if (message.is_paused) {
+                    $("#pause_button").text("Resume Game").removeClass("btn-warning").addClass("btn-success");
+                    $("#declare_action_form").hide();
+                } else {
+                    $("#pause_button").text("Pause Game").removeClass("btn-success").addClass("btn-warning");
+                    if (isPlayerTurn()) {
+                        $("#declare_action_form").show();
+                    }
+                }
+            } else if ('config_update' == message['message_type']) {
               updater.updateConfig(message)
             } else if ('start_game' == message['message_type']) {
               updater.startGame(message)
@@ -87,7 +107,7 @@ var updater = {
             } else if ('alert_restart_server' == message['message_type']) {
               updater.alert_restart_server(message)
             } else {
-              window.console.error("received unexpected message: " + message)
+              console.error("Unexpected message:", message)
             }
         }
     },
@@ -127,6 +147,7 @@ var updater = {
         content = message['content']
         window.console.log("updateGame: " + JSON.stringify(content))
         message_type = content['update_type']
+        window.console.log("event html : " + JSON.stringify(content.event_html))
         if ('round_start_message' == message_type) {
           updater.roundStart(content.event_html)
         } else if ('street_start_message' == message_type) {
@@ -175,7 +196,20 @@ var updater = {
 
     alert_restart_server: function(message) {
       alert(message.message)
+    },
+
+    togglePause: function() {
+        var message = {
+            'type': "action_toggle_pause"
+        };
+        updater.socket.send(JSON.stringify(message));
     }
 
 };
+
+function isPlayerTurn() {
+    // This is a placeholder - you'll need to implement the actual logic
+    // based on your game state
+    return $("#declare_action_form").is(":visible");
+}
 
