@@ -7,6 +7,7 @@ from keras.models import Model
 from pypokerengine.players import BasePokerPlayer
 from pypokerengine.api.emulator import Emulator
 from pypokerengine.utils.game_state_utils import restore_game_state
+from pypokerengine.utils.card_utils import gen_cards, estimate_hole_card_win_rate
 
 
 class QLearningPlayer(BasePokerPlayer):
@@ -22,35 +23,55 @@ class QLearningPlayer(BasePokerPlayer):
 
     def __init__(self):
 
-        def keras_model():
+        super().__init__()
 
-            input_cards = Input(shape=(4,13,4), name="cards_input")
-            input_actions = Input(shape=(2,6,4), name="actions_input")
-            input_position = Input(shape=(1,),name="position_input")
+        self.vvh = 0
+        self.action_sb = 3
+        # self.table = {}
+        # self.my_cards = []
+        self.sb_features = None
+        self.prev_round_features = []
+        self.prev_reward_state = []
+        self.has_played = False
+        self.model = self.keras_model()
+        self.target_Q = [[0, 0, 0]]
 
-            x1 = Conv2D(32,(2,2),activation='relu')(input_cards)
-            x2 = Conv2D(32,(2,2),activation='relu')(input_actions)
-            x3 = Dense(1,activation='relu')(input_position)
+    def keras_model(self):
+        input_cards = Input(shape=(4,13,4), name="cards_input")        # Shape: (4,13,4)
+        input_actions = Input(shape=(2,6,4), name="actions_input")     # Shape: (2,6,4)
+        input_position = Input(shape=(1,), name="position_input")      # Shape: (1,)
 
-            d1 = Dense(128,activation='relu')(x1)
-            d1 = Flatten()(d1)
-            d2 = Dense(128,activation='relu')(x2)
-            d2 = Flatten()(d2)
-            x = concatenate([d1,d2,x3])
-            x = Dense(128)(x)
-            x = Dense(128)(x)
-            x = Dense(128)(x)
-            x = Dense(128)(x)
-            x = Dense(32)(x)
-            out = Dense(3)(x)
+        # Conv on cards
+        x1 = Conv2D(32, (2,2), activation='relu')(input_cards)
+        x1 = Dense(128, activation='relu')(x1)
+        x1 = Flatten()(x1)
 
-            model = Model(inputs=[input_cards, input_actions,input_position], outputs=out)
-            if self.vvh == 0:
-                model.load_weights('add3_2000_smarthonest.h5', by_name=True)
+        # Conv on actions
+        x2 = Conv2D(32, (2,2), activation='relu')(input_actions)
+        x2 = Dense(128, activation='relu')(x2)
+        x2 = Flatten()(x2)
 
-            model.compile(optimizer='rmsprop', loss='mse')
+        # Dense on position
+        x3 = Dense(1, activation='relu')(input_position)
 
-            return model
+        # Concatenate all features
+        x = concatenate([x1, x2, x3])  # x has shape (5249,) when Flatten works correctly
+
+        x = Dense(128)(x)
+        x = Dense(128)(x)
+        x = Dense(128)(x)
+        x = Dense(128)(x)
+        x = Dense(32)(x)
+        out = Dense(3)(x)
+
+        model = Model(inputs=[input_cards, input_actions, input_position], outputs=out)
+        
+        model.load_weights('strategy2.h5')  # No `by_name=True`, to ensure layer names align
+        print("✅ Loaded pretrained weights successfully.")
+
+        model.compile(optimizer='rmsprop', loss='mse')
+        return model
+
 
         def keras_model_random_initialise():
             input_cards = Input(shape=(4,13,4), name="cards_input")
@@ -78,16 +99,6 @@ class QLearningPlayer(BasePokerPlayer):
 
             return model
 
-        self.vvh = 0
-        self.action_sb = 3
-        # self.table = {}
-        # self.my_cards = []
-        self.sb_features = None
-        self.prev_round_features = []
-        self.prev_reward_state = []
-        self.has_played = False
-        self.model = keras_model_random_initialise()
-        self.target_Q = [[0, 0, 0]]
 
     def declare_action(self, valid_actions, hole_card, round_state):
 
@@ -160,7 +171,20 @@ class QLearningPlayer(BasePokerPlayer):
             elif chosen_action == "raise":
                 raise_action = [a for a in valid_actions if a["action"] == "raise"][0]
                 min_raise = raise_action["amount"]["min"]
-                return "raise", min_raise
+                max_raise = raise_action["amount"]["max"]
+
+                # Estimate win rate
+                community_card = round_state.get("community_card", [])
+                win_rate = estimate_hole_card_win_rate(
+                    nb_simulation=100,
+                    hole_card=gen_cards(hole_card),
+                    community_card=gen_cards(community_card),
+                    nb_player=len(round_state["seats"])
+                )
+
+                # Scale raise amount based on win rate
+                scaled_raise = int(min_raise + (max_raise - min_raise) * win_rate)
+                return "raise", scaled_raise
             else:
                 # fallback to fold
                 return "fold", 0
@@ -236,13 +260,17 @@ class QLearningPlayer(BasePokerPlayer):
 
         self.has_played = True
 
-        for ve in range(len(self.prev_round_features)):
-            self.model.fit(self.prev_round_features[ve], self.prev_reward_state[ve], verbose=0)
+        # for ve in range(len(self.prev_round_features)):
+        #     self.model.fit(self.prev_round_features[ve], self.prev_reward_state[ve], verbose=0)
 
         return pick_action()
 
     def receive_game_start_message(self, game_info):
-        QLearningPlayer.my_uuid = self.uuid
+        if hasattr(self, 'uuid'):
+            QLearningPlayer.my_uuid = self.uuid
+        else:
+            print("[Error] uuid not set before receive_game_start_message.")
+
 
     def receive_round_start_message(self, round_count, hole_card, seats):
         for seat in seats:
@@ -283,8 +311,12 @@ class QLearningPlayer(BasePokerPlayer):
             del self.prev_round_features[0]
             del self.prev_reward_state[0]
 
-        for ev in range(len(self.prev_round_features)):
-            self.model.fit(self.prev_round_features[ev], self.prev_reward_state[ev], verbose=0)
+        # for ev in range(len(self.prev_round_features)):
+        #     self.model.fit(self.prev_round_features[ev], self.prev_reward_state[ev], verbose=0)
+
+    def set_uuid(self, uuid):
+        self.uuid = uuid
+
 
 
 
